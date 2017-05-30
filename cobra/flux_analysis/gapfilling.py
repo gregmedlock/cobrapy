@@ -11,10 +11,16 @@ class SUXModelMILP(Model):
     reaction which are used to impose MILP constraints to minimize the
     total number of added reactions. See the figure for more
     information on the structure of the matrix.
+
+    Modified to include reaction likelihoods in the Universal model. if
+    likelihoods is True, reaction.notes["likehood"] is used to set the
+    penalty for each universal reaction (as 1 - likelihood, where 1 is high
+    probability and 0 is low probability)
     """
 
     def __init__(self, model, Universal=None, threshold=.05,
-                 penalties=None, dm_rxns=True, ex_rxns=False):
+                 penalties=None, dm_rxns=True, ex_rxns=False,
+                 likelihoods=False):
         Model.__init__(self, "")
         # store parameters
         self.threshold = threshold
@@ -33,6 +39,15 @@ class SUXModelMILP(Model):
 
         for rxn in Universal.reactions:
             rxn.notes["gapfilling_type"] = "Universal"
+            # If likelihoods are used, add likelihood to the reverse reactions
+            # created from convert_to_irreversible
+            if likelihoods:
+                if 'reflection' in rxn.notes.keys():
+                    if not rxn.notes["reflection"].endswith('reverse'):
+                        # Get likeihood of the reflection (i.e. original likelihood
+                        # before rxn was split)
+                        rxn.notes["likelihood"] = \
+                            Universal.reactions.get_by_id(rxn.notes["reflection"]).notes["likelihood"]
 
         # SUX += Exchange (when exchange generator has been written)
         # For now, adding exchange reactions to Universal - could add to a new
@@ -75,8 +90,12 @@ class SUXModelMILP(Model):
             indicator_reaction.lower_bound = 0
             indicator_reaction.upper_bound = 1
             indicator_reaction.variable_kind = "integer"
-            indicator_reaction.objective_coefficient = \
-                self.penalties[reaction.notes["gapfilling_type"]]
+            if reaction.notes["gapfilling_type"] is "Universal" and likelihoods:
+                indicator_reaction.objective_coefficient = \
+                    1.0 - reaction.notes["likelihood"]
+            else:
+                indicator_reaction.objective_coefficient = \
+                    self.penalties[reaction.notes["gapfilling_type"]]
             indicators.append(indicator_reaction)
         Model.add_reactions(self, indicators)
 
@@ -106,12 +125,12 @@ class SUXModelMILP(Model):
         if solver is None:
             solver = get_solver_name(mip=True)
         used_reactions = [None] * iterations
-        numeric_error_cutoff = 0.0001
+        numeric_error_cutoff = 0.00000000001
         self._update_objectives()
         for i in range(iterations):
             used_reactions[i] = []
             self.optimize(objective_sense="minimize",
-                          solver=solver, **solver_parameters)
+                          solver=solver, time_limit=time_limit,**solver_parameters)
             if debug:
                 print("Iteration %d: Status is %s" % (i, self.solution.status))
             for reaction in self.added_reactions:
@@ -121,19 +140,24 @@ class SUXModelMILP(Model):
                 ind = self.reactions.get_by_id("indicator_" + reaction.id)
                 if ind.x > numeric_error_cutoff:
                     used_reactions[i].append(reaction)
-                    ind.objective_coefficient += \
-                        self.penalties[reaction.notes["gapfilling_type"]]
+                    if reaction.notes['likelihood'] > 0.0:
+                        ind.objective_coefficient += \
+                            1.0 - reaction.notes['likelihood']
+                    else:
+                        ind.objective_coefficient += \
+                            self.penalties[reaction.notes["gapfilling_type"]]
                     if debug:
                         print('    ', reaction, reaction.objective_coefficient)
 
         return used_reactions
+        #return self
 
 
 def growMatch(model, Universal, dm_rxns=False, ex_rxns=False,
-              penalties=None, **solver_parameters):
+              penalties=None, likelihoods=False,**solver_parameters):
     """runs growMatch"""
     SUX = SUXModelMILP(model, Universal, dm_rxns=dm_rxns, ex_rxns=ex_rxns,
-                       penalties=penalties)
+                       penalties=penalties,likelihoods=likelihoods)
     return SUX.solve(**solver_parameters)
 
 
